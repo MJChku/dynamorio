@@ -6419,6 +6419,17 @@ fixup_last_cti(dcontext_t *dcontext, instrlist_t *trace, app_pc next_tag, uint n
             }
         } /* is exit cti */
     }
+    if (targeter == NULL) {
+        print_file(STDERR,
+                         "GXVM_TRACE_TARGET_MISSING tid=%d next=" PFX
+                         " next_flags=0x%x trace_flags=0x%x prev_f=" PFX
+                         " prev_l=" PFX " ordinal=%u remaining=%u start=" PFX
+                         " end=" PFX "\n",
+                         d_r_get_thread_id(), next_tag, next_flags, trace_flags,
+                         prev_f, prev_l, nth_exit, cur_exit, start_instr, end_instr);
+        instrlist_disassemble(dcontext, next_tag, trace, STDERR);
+        print_file(STDERR, "GXVM_TRACE_TARGET_MISSING_END\n");
+    }
     ASSERT(targeter != NULL);
     if (record_translation)
         instrlist_set_translation_target(trace, instr_get_translation(targeter));
