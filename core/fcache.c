@@ -52,6 +52,9 @@
 #include "perscache.h"
 #include "synch.h"
 #include "instrument.h"
+#ifdef LINUX
+#    include "unix/include/syscall.h"
+#endif
 
 /* A code cache is made up of multiple separate mmapped units
  * We grow a unit by resizing, shifting, and relinking, up to a maximum size,
@@ -66,6 +69,59 @@
 
 /* to make it easy to switch to INTERNAL_OPTION */
 #define FCACHE_OPTION(o) dynamo_options.o
+
+#if defined(LINUX) && defined(X86)
+#    define CODE_CACHE_HUGE_PAGE_SIZE (2 * 1024 * 1024)
+#    define CODE_CACHE_MADV_HUGEPAGE 14
+#    define CODE_CACHE_MADV_COLLAPSE 25
+
+/* Mark the complete reservation eligible when it is created, then collapse
+ * each 2-MiB-aligned range once it becomes fully committed.  The option is
+ * deliberately explicit: large cache units trade virtual address space for
+ * fewer instruction-TLB translations and are primarily useful for very large
+ * translated applications. */
+static void
+fcache_advise_huge_pages(cache_pc start, cache_pc old_end, cache_pc new_end,
+                         cache_pc reserved_end, bool new_reservation)
+{
+    cache_pc collapse_start;
+    cache_pc collapse_end;
+
+    if (!DYNAMO_OPTION(code_cache_huge_pages))
+        return;
+    if (new_reservation) {
+        (void)dynamorio_syscall(SYS_madvise, 3, start,
+                                (size_t)(reserved_end - start),
+                                CODE_CACHE_MADV_HUGEPAGE);
+    }
+    collapse_start = (cache_pc)ALIGN_BACKWARD(old_end,
+                                               CODE_CACHE_HUGE_PAGE_SIZE);
+    if (collapse_start < (cache_pc)ALIGN_FORWARD(
+                             start, CODE_CACHE_HUGE_PAGE_SIZE)) {
+        collapse_start = (cache_pc)ALIGN_FORWARD(
+            start, CODE_CACHE_HUGE_PAGE_SIZE);
+    }
+    collapse_end = (cache_pc)ALIGN_BACKWARD(new_end,
+                                            CODE_CACHE_HUGE_PAGE_SIZE);
+    if (collapse_end > collapse_start) {
+        (void)dynamorio_syscall(SYS_madvise, 3, collapse_start,
+                                (size_t)(collapse_end - collapse_start),
+                                CODE_CACHE_MADV_COLLAPSE);
+    }
+}
+#else
+static void
+fcache_advise_huge_pages(cache_pc start, cache_pc old_end, cache_pc new_end,
+                         cache_pc reserved_end, bool new_reservation)
+{
+    /* Linux/x86 is the only GXVM deployment which enables this option. */
+    (void)start;
+    (void)old_end;
+    (void)new_end;
+    (void)reserved_end;
+    (void)new_reservation;
+}
+#endif
 
 /*
  * unit initial size is FCACHE_OPTION(cache_{bb,trace}_unit_init, default is 32*1024
@@ -1408,6 +1464,10 @@ fcache_create_unit(dcontext_t *dcontext, fcache_t *cache, cache_pc pc, size_t si
             }
             u->start_pc = (cache_pc)heap_mmap_reserve(
                 size, commit_size, MEMPROT_EXEC | MEMPROT_READ | MEMPROT_WRITE, which);
+            ASSERT(u->start_pc != NULL);
+            fcache_advise_huge_pages(
+                u->start_pc, u->start_pc, u->start_pc + commit_size,
+                u->start_pc + size, true /* new reservation */);
         }
         ASSERT(u->start_pc != NULL);
         ASSERT(proc_is_cache_aligned((void *)u->start_pc));
@@ -1904,10 +1964,15 @@ fcache_shift_fragments(dcontext_t *dcontext, fcache_unit_t *unit, ssize_t shift,
 static void
 cache_extend_commitment(fcache_unit_t *unit, size_t commit_size)
 {
+    cache_pc old_end;
     ASSERT(unit != NULL);
     ASSERT(ALIGNED(commit_size, DYNAMO_OPTION(cache_commit_increment)));
+    old_end = unit->end_pc;
     heap_mmap_extend_commitment(unit->end_pc, commit_size, VMM_CACHE | VMM_REACHABLE);
     unit->end_pc += commit_size;
+    fcache_advise_huge_pages(unit->start_pc, old_end, unit->end_pc,
+                             unit->reserved_end_pc,
+                             false /* existing reservation */);
     unit->size += commit_size;
     unit->cache->size += commit_size;
     unit->full = false;
@@ -2044,6 +2109,11 @@ fcache_increase_size(dcontext_t *dcontext, fcache_t *cache, fcache_unit_t *unit,
         new_memory = (cache_pc)heap_mmap_reserve(
             new_size, commit_size, MEMPROT_EXEC | MEMPROT_READ | MEMPROT_WRITE,
             VMM_CACHE | VMM_REACHABLE);
+        ASSERT(new_memory != NULL);
+        fcache_advise_huge_pages(new_memory, new_memory,
+                                 new_memory + commit_size,
+                                 new_memory + new_size,
+                                 true /* new reservation */);
         STATS_FCACHE_SUB(cache, capacity, unit->size);
         STATS_FCACHE_ADD(cache, capacity, commit_size);
         STATS_FCACHE_MAX(cache, capacity_peak, capacity);

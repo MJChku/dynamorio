@@ -1347,6 +1347,8 @@ OPTION_DEFAULT_INTERNAL(uint_size, max_heap_unit_size, 256 * 1024,
 OPTION_DEFAULT(uint_size, heap_commit_increment, 4 * 1024, "heap commit increment")
 /* cache_commit_increment may be adjusted by adjust_defaults_for_page_size(). */
 OPTION_DEFAULT(uint_size, cache_commit_increment, 4 * 1024, "cache commit increment")
+OPTION(bool, code_cache_huge_pages,
+       "request transparent huge pages for committed code cache ranges")
 
 /* cache capacity control
  * XXX: these are external for now while we study the right way to
