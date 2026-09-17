@@ -4626,6 +4626,36 @@ fd_is_dr_owned(file_t fd)
     return (flags != 0);
 }
 
+#ifdef SYS_close_range
+static bool
+fd_table_next_owned_in_range(uint first_fd, uint last_fd, uint *next_fd)
+{
+    int iter = 0;
+    ptr_uint_t fd;
+    void *flags;
+    bool found = false;
+    uint nearest = 0;
+
+    ASSERT(fd_table != NULL);
+    TABLE_RWLOCK(fd_table, read, lock);
+    do {
+        iter = generic_hash_iterate_next(GLOBAL_DCONTEXT, fd_table, iter, &fd,
+                                         &flags);
+        if (iter < 0)
+            break;
+        if (fd >= first_fd && fd <= last_fd &&
+            (!found || fd < (ptr_uint_t)nearest)) {
+            nearest = (uint)fd;
+            found = true;
+        }
+    } while (iter >= 0);
+    TABLE_RWLOCK(fd_table, read, unlock);
+    if (found)
+        *next_fd = nearest;
+    return found;
+}
+#endif
+
 static bool
 fd_is_in_private_range(file_t fd)
 {
@@ -8294,41 +8324,48 @@ pre_system_call(dcontext_t *dcontext)
             DODEBUG({ dcontext->expect_last_syscall_to_fail = true; });
             break;
         }
-        uint cur_range_first_fd = 0;
-        uint cur_range_last_fd = 0;
-        bool cur_range_valid = false;
+        uint cur_range_first_fd;
         int ret = 0;
-        for (int i = first_fd; i <= last_fd; i++) {
-            /* Do not allow any changes to DR-owned FDs. */
-            if ((is_cloexec && fd_is_dr_owned(i)) ||
-                (!is_cloexec && !handle_close_range_pre(dcontext, i))) {
-                SYSLOG_INTERNAL_WARNING_ONCE("app trying to close private fd(s)");
-                if (cur_range_valid) {
-                    cur_range_valid = false;
-                    ret = dynamorio_syscall(SYS_close_range, 3, cur_range_first_fd,
-                                            cur_range_last_fd, flags);
-                    if (ret != 0)
-                        break;
-                }
-            } else {
-#    ifdef LINUX
-                if (!is_cloexec) {
-                    signal_handle_close(dcontext, i);
-                }
-#    endif
-                if (cur_range_valid) {
-                    ASSERT(cur_range_last_fd == i - 1);
-                    cur_range_last_fd = i;
-                } else {
-                    cur_range_first_fd = i;
-                    cur_range_last_fd = i;
-                    cur_range_valid = true;
-                }
+
+        /* Preserve DR's private copies when the application closes a stdio
+         * descriptor.  Ordinary application descriptors require no per-fd
+         * bookkeeping here. */
+        if (!is_cloexec) {
+            uint stdfd;
+            for (stdfd = 0; stdfd <= STDERR_FILENO; ++stdfd) {
+                if (stdfd >= first_fd && stdfd <= last_fd)
+                    (void)handle_close_range_pre(dcontext, stdfd);
             }
         }
-        if (cur_range_valid) {
+
+        /* Split only at the sparse set of DR-owned descriptors.  The old
+         * implementation walked every integer in [first_fd,last_fd] and took
+         * tens of seconds for CPython's close_range(3, RLIMIT_NOFILE-1). */
+        cur_range_first_fd = first_fd;
+        while (cur_range_first_fd <= last_fd) {
+            uint protected_fd = 0;
+            uint cur_range_last_fd;
+            bool have_protected = fd_table_next_owned_in_range(
+                cur_range_first_fd, last_fd, &protected_fd);
+
+            if (have_protected && protected_fd == cur_range_first_fd) {
+                SYSLOG_INTERNAL_WARNING_ONCE("app trying to close private fd(s)");
+                if (protected_fd == UINT_MAX)
+                    break;
+                cur_range_first_fd = protected_fd + 1;
+                continue;
+            }
+            cur_range_last_fd = have_protected ? protected_fd - 1 : last_fd;
+#    ifdef LINUX
+            if (!is_cloexec)
+                signal_handle_close_range(dcontext, cur_range_first_fd,
+                                          cur_range_last_fd);
+#    endif
             ret = dynamorio_syscall(SYS_close_range, 3, cur_range_first_fd,
                                     cur_range_last_fd, flags);
+            if (ret != 0 || !have_protected || protected_fd == UINT_MAX)
+                break;
+            cur_range_first_fd = protected_fd + 1;
         }
         if (ret != 0) {
             set_failure_return_val(dcontext, ret);

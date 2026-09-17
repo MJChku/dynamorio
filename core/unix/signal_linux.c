@@ -349,6 +349,29 @@ signalfd_thread_exit(dcontext_t *dcontext, thread_sig_info_t *info)
     TABLE_RWLOCK(sigfd_table, write, unlock);
 }
 
+void
+signal_handle_close_range(dcontext_t *dcontext, uint first_fd, uint last_fd)
+{
+    int iter = 0;
+    ptr_uint_t fd;
+    void *payload;
+
+    /* close_range() is routinely called with the process fd limit as its
+     * upper bound.  Walk only descriptors that actually need signalfd
+     * emulation bookkeeping instead of locking this sparse table once for
+     * every integer in that range. */
+    TABLE_RWLOCK(sigfd_table, write, lock);
+    do {
+        iter = generic_hash_iterate_next(GLOBAL_DCONTEXT, sigfd_table, iter, &fd,
+                                         &payload);
+        if (iter < 0)
+            break;
+        if (fd >= first_fd && fd <= last_fd)
+            iter = generic_hash_iterate_remove(GLOBAL_DCONTEXT, sigfd_table, iter, fd);
+    } while (iter >= 0);
+    TABLE_RWLOCK(sigfd_table, write, unlock);
+}
+
 bool
 handle_pre_extended_syscall_sigmasks(dcontext_t *dcontext, kernel_sigset_t *sigmask,
                                      size_t sizemask, bool *pending)
