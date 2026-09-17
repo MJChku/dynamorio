@@ -48,6 +48,10 @@ void
 unit_test_os(void);
 void
 unit_test_memquery(void);
+#    ifndef MACOS
+void
+unit_test_module_elf(void);
+#    endif
 #endif
 void
 unit_test_options(void);
@@ -83,6 +87,9 @@ main(int argc, char **argv, char **envp)
     unit_test_string();
     unit_test_os();
     unit_test_memquery();
+#    ifndef MACOS
+    unit_test_module_elf();
+#    endif
 #endif
     unit_test_utils();
     unit_test_opnd_shared();

@@ -811,6 +811,38 @@ module_get_header_size(app_pc module_base)
         return sizeof(Elf32_Ehdr);
 }
 
+/* Scans a bounded PT_DYNAMIC view.  Returns whether it has text relocations and
+ * sets valid when the view contains a complete, readable dynamic array.
+ */
+static bool
+module_dynamic_view_has_text_relocs(ELF_DYNAMIC_ENTRY_TYPE *dyn, size_t dyn_count,
+                                    bool *valid)
+{
+    ELF_DYNAMIC_ENTRY_TYPE safe_dyn;
+    size_t i;
+
+    *valid = false;
+    for (i = 0; i < dyn_count; i++, dyn++) {
+        if (!d_r_safe_read(dyn, sizeof(safe_dyn), &safe_dyn))
+            return false;
+        if (safe_dyn.d_tag == DT_NULL) {
+            *valid = true;
+            return false;
+        }
+        /* Older binaries have a separate DT_TEXTREL entry. */
+        if (safe_dyn.d_tag == DT_TEXTREL) {
+            *valid = true;
+            return true;
+        }
+        /* Newer binaries have a DF_TEXTREL flag in DT_FLAGS. */
+        if (safe_dyn.d_tag == DT_FLAGS && TESTANY(DF_TEXTREL, safe_dyn.d_un.d_val)) {
+            *valid = true;
+            return true;
+        }
+    }
+    return false;
+}
+
 /* returns true if the module is marked as having text relocations.
  * XXX: should we also have a routine that walks the relocs (once that
  * code is in) and really checks whether there are any text
@@ -819,44 +851,71 @@ module_get_header_size(app_pc module_base)
 bool
 module_has_text_relocs(app_pc base, bool at_map)
 {
-    app_pc mod_base, mod_end;
+    app_pc mod_base;
     ptr_int_t load_delta; /* delta loaded at relative to base */
     uint i;
     ELF_HEADER_TYPE *elf_hdr = (ELF_HEADER_TYPE *)base;
     ELF_PROGRAM_HEADER_TYPE *prog_hdr;
-    ELF_DYNAMIC_ENTRY_TYPE *dyn = NULL;
+    ELF_PROGRAM_HEADER_TYPE *dyn_hdr = NULL;
+    ELF_DYNAMIC_ENTRY_TYPE *dyn;
+    ELF_DYNAMIC_ENTRY_TYPE *alternate_dyn;
+    size_t dyn_count;
+    size_t alternate_dyn_count;
+    bool valid;
+    bool has_text_relocs;
+    bool found_valid_view = false;
 
     ASSERT(is_elf_so_header(base, 0));
     /* walk program headers to get mod_base */
     mod_base = module_vaddr_from_prog_header(base + elf_hdr->e_phoff, elf_hdr->e_phnum,
-                                             NULL, &mod_end);
+                                             NULL, NULL);
     load_delta = base - mod_base;
     /* walk program headers to get dynamic section pointer */
     prog_hdr = (ELF_PROGRAM_HEADER_TYPE *)(base + elf_hdr->e_phoff);
     for (i = 0; i < elf_hdr->e_phnum; i++) {
         if (prog_hdr->p_type == PT_DYNAMIC) {
-            dyn = (ELF_DYNAMIC_ENTRY_TYPE *)(at_map ? (base + prog_hdr->p_offset)
-                                                    : (app_pc)(prog_hdr->p_vaddr +
-                                                               load_delta));
+            dyn_hdr = prog_hdr;
             break;
         }
         prog_hdr++;
     }
-    if (dyn == NULL)
+    if (dyn_hdr == NULL)
         return false;
-    ASSERT((app_pc)dyn > base && (app_pc)dyn < mod_end + load_delta);
-    while (dyn->d_tag != DT_NULL) {
-        /* Older binaries have a separate DT_TEXTREL entry */
-        if (dyn->d_tag == DT_TEXTREL)
+    dyn = (ELF_DYNAMIC_ENTRY_TYPE *)(at_map ? (base + dyn_hdr->p_offset)
+                                            : (app_pc)(dyn_hdr->p_vaddr + load_delta));
+    dyn_count = (size_t)(at_map ? dyn_hdr->p_filesz : dyn_hdr->p_memsz) / sizeof(*dyn);
+    has_text_relocs = module_dynamic_view_has_text_relocs(dyn, dyn_count, &valid);
+    if (valid) {
+        found_valid_view = true;
+        if (has_text_relocs)
             return true;
-        /* Newer binaries have a DF_TEXTREL flag in DT_FLAGS */
-        if (dyn->d_tag == DT_FLAGS) {
-            if (TESTANY(DF_TEXTREL, dyn->d_un.d_val))
+    }
+
+    /* Depending on when an mmap is observed, base can refer either to the file
+     * view or to the loaded virtual-address view.  at_map normally distinguishes
+     * them, but a persisted unit can be resurrected after the loader has already
+     * replaced the file view.  Check the other representation as well.  In
+     * particular, p_offset and p_vaddr need only be congruent modulo the page size
+     * and can differ.
+     */
+    alternate_dyn = (ELF_DYNAMIC_ENTRY_TYPE *)(
+        at_map ? (app_pc)(dyn_hdr->p_vaddr + load_delta) : (base + dyn_hdr->p_offset));
+    alternate_dyn_count =
+        (size_t)(at_map ? dyn_hdr->p_memsz : dyn_hdr->p_filesz) / sizeof(*alternate_dyn);
+    if (alternate_dyn != dyn) {
+        has_text_relocs = module_dynamic_view_has_text_relocs(
+            alternate_dyn, alternate_dyn_count, &valid);
+        if (valid) {
+            found_valid_view = true;
+            if (has_text_relocs)
                 return true;
         }
-        dyn++;
     }
-    return false;
+
+    /* A valid dynamic array must have a DT_NULL entry within PT_DYNAMIC.  If
+     * neither representation is valid, conservatively assume text relocations.
+     */
+    return !found_valid_view;
 }
 
 /* check if module has text relocations by checking os_privmod_data's
@@ -868,6 +927,73 @@ module_has_text_relocs_ex(app_pc base, os_privmod_data_t *pd)
     ASSERT(pd != NULL);
     return pd->textrel;
 }
+
+#ifdef STANDALONE_UNIT_TEST
+void
+unit_test_module_elf(void)
+{
+    enum {
+        IMAGE_SIZE = 4096,
+        FILE_DYN_OFFSET = 0x200,
+        MEMORY_DYN_OFFSET = 0x300,
+    };
+    byte image[IMAGE_SIZE] = { 0 };
+    ELF_HEADER_TYPE *ehdr = (ELF_HEADER_TYPE *)image;
+    ELF_PROGRAM_HEADER_TYPE *phdr =
+        (ELF_PROGRAM_HEADER_TYPE *)(image + sizeof(*ehdr));
+    ELF_DYNAMIC_ENTRY_TYPE *file_dyn =
+        (ELF_DYNAMIC_ENTRY_TYPE *)(image + FILE_DYN_OFFSET);
+    ELF_DYNAMIC_ENTRY_TYPE *memory_dyn =
+        (ELF_DYNAMIC_ENTRY_TYPE *)(image + MEMORY_DYN_OFFSET);
+
+    memcpy(ehdr->e_ident, ELFMAG, SELFMAG);
+    ehdr->e_ident[EI_CLASS] = IF_X64_ELSE(ELFCLASS64, ELFCLASS32);
+    ehdr->e_ident[EI_DATA] = ELFDATA2LSB;
+    ehdr->e_ident[EI_VERSION] = EV_CURRENT;
+    ehdr->e_type = ET_DYN;
+    ehdr->e_machine = IF_X64_ELSE(EM_X86_64, EM_386);
+    ehdr->e_version = EV_CURRENT;
+    ehdr->e_ehsize = sizeof(*ehdr);
+    ehdr->e_phoff = sizeof(*ehdr);
+    ehdr->e_phentsize = sizeof(*phdr);
+    ehdr->e_phnum = 2;
+
+    phdr[0].p_type = PT_LOAD;
+    phdr[0].p_filesz = IMAGE_SIZE;
+    phdr[0].p_memsz = IMAGE_SIZE;
+    phdr[1].p_type = PT_DYNAMIC;
+    phdr[1].p_offset = FILE_DYN_OFFSET;
+    phdr[1].p_vaddr = MEMORY_DYN_OFFSET;
+    phdr[1].p_filesz = 2 * sizeof(*file_dyn);
+    phdr[1].p_memsz = 2 * sizeof(*memory_dyn);
+
+    /* Model a persistence lookup after an initial file view has been replaced
+     * by the loaded image: the file-offset view is readable but incomplete,
+     * while the virtual-address view contains the real dynamic array.
+     */
+    file_dyn[0].d_tag = DT_NEEDED;
+    file_dyn[1].d_tag = DT_NEEDED;
+    memory_dyn[0].d_tag = DT_FLAGS;
+    memory_dyn[1].d_tag = DT_NULL;
+    ASSERT(!module_has_text_relocs(image, true));
+    ASSERT(!module_has_text_relocs(image, false));
+
+    /* A plausible but stale file view must not hide text relocations in the
+     * loaded view.
+     */
+    file_dyn[0].d_tag = DT_NULL;
+    memory_dyn[0].d_un.d_val = DF_TEXTREL;
+    ASSERT(module_has_text_relocs(image, true));
+
+    /* With neither view terminated, fail conservatively without reading past
+     * the declared PT_DYNAMIC bounds.
+     */
+    file_dyn[0].d_tag = DT_NEEDED;
+    memory_dyn[0].d_tag = DT_NEEDED;
+    memory_dyn[1].d_tag = DT_NEEDED;
+    ASSERT(module_has_text_relocs(image, true));
+}
+#endif /* STANDALONE_UNIT_TEST */
 
 /* This is a helper function that get section from the image with
  * specific name.
