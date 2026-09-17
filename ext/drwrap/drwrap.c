@@ -1664,7 +1664,12 @@ drwrap_event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
                 }
                 drwrap_replace_native_bb(drcontext, bb, inst, pc, rn, topush);
                 hashtable_unlock(&replace_native_table);
-                break;
+                /* The replacement leaves via a meta jump and resumes through
+                 * a native continuation, not this block's application
+                 * fall-through edge. Trace stitching cannot join that edge to
+                 * the continuation (fixup_last_cti finds no targeting exit).
+                 */
+                return DR_EMIT_MUST_END_TRACE;
             }
             hashtable_unlock(&replace_native_table);
         }
