@@ -11483,26 +11483,23 @@ bool
 os_thread_re_take_over(void)
 {
 #ifdef X86
-    /* i#2089: is_thread_initialized() will fail for a currently-native app.
-     * We bypass the magic field checks here of is_thread_tls_initialized().
-     * XXX: should this be inside is_thread_initialized()?  But that may mislead
-     * other callers: the caller has to restore the TLs.  Some old code also
-     * used get_thread_private_dcontext() being NULL to indicate an unknown thread:
-     * that should also call here.
-     */
-    if (!is_thread_initialized() && is_thread_tls_allocated()) {
-        /* It's safe to call thread_lookup() for ourself. */
-        thread_record_t *tr = thread_lookup(get_sys_thread_id());
-        if (tr != NULL) {
-            ASSERT(is_thread_currently_native(tr));
+    /* It is safe to look up our own record here.  Do that before touching the
+     * segment-based TLS: an unknown native thread can have any application GS
+     * base and can block SIGSEGV, making the usual fault-recovering TLS probe
+     * fatal during attach. */
+    thread_record_t *tr = thread_lookup(get_sys_thread_id());
+    if (tr != NULL) {
+        if (is_thread_currently_native(tr)) {
             LOG(GLOBAL, LOG_THREADS, 1, "\tretakeover for cur-native thread " TIDFMT "\n",
                 get_sys_thread_id());
             LOG(tr->dcontext->logfile, LOG_THREADS, 1,
                 "\nretakeover for cur-native thread " TIDFMT "\n", get_sys_thread_id());
             os_swap_dr_tls(tr->dcontext, false /*to dr*/);
             ASSERT(is_thread_initialized());
-            return true;
         }
+        /* The record identifies a known thread without probing application
+         * TLS.  Once DR TLS is active, retain the normal consistency check. */
+        return is_thread_tls_allocated();
     }
 #endif
     return false;
@@ -11541,6 +11538,12 @@ os_thread_take_over(priv_mcontext_t *mc, kernel_sigset_t *sigset)
     void *pt_param = NULL;
 #endif
 
+    /* Native code may block SIGSEGV/SIGBUS.  DR's thread initialization uses
+     * guarded reads before segment TLS exists, and those guards require the
+     * crash handlers to be deliverable.  The application mask in sigset is
+     * installed below after initialization, preserving its virtual mask. */
+    signal_takeover_unblock_crash_signals();
+
     LOG(GLOBAL, LOG_THREADS, 1, "TAKEOVER: received signal in thread " TIDFMT "\n",
         get_sys_thread_id());
 
@@ -11548,8 +11551,8 @@ os_thread_take_over(priv_mcontext_t *mc, kernel_sigset_t *sigset)
      * create_clone_record and new_thread_setup, except we're not putting a
      * clone record on the dstack.
      */
-    os_thread_re_take_over();
-    if (!is_thread_initialized()) {
+    bool retaken = os_thread_re_take_over();
+    if (!retaken) {
         /* If this is a thread on its way to init, don't self-interp (i#2688). */
         if (is_dynamo_address(mc->pc)) {
             os_thread_signal_taken_over();

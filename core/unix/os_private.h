@@ -318,6 +318,11 @@ bool
 is_thread_signal_info_initialized(dcontext_t *dcontext);
 void
 signal_swap_mask(dcontext_t *dcontext, bool to_app);
+/* Attach can enter on an application thread that blocks synchronous crash
+ * signals.  Temporarily unblock DR's safe-read recovery signals before its
+ * TLS and heap initialization touches fault-recovering probes. */
+void
+signal_takeover_unblock_crash_signals(void);
 void
 signal_remove_handlers(dcontext_t *dcontext);
 void

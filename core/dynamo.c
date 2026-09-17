@@ -2304,7 +2304,13 @@ dynamo_thread_init(byte *dstack_in, priv_mcontext_t *mc, void *os_data,
         d_r_mutex_lock(&thread_initexit_lock);
     }
 
-    if (is_thread_initialized()) {
+    /* We already hold thread_initexit_lock, so the global table is the
+     * authoritative duplicate-initialization check.  On Unix, avoid the
+     * segment-TLS based query here: attach can arrive on an unknown native
+     * thread whose application segment base is arbitrary and whose SIGSEGV is
+     * blocked, making the fault-recovering TLS probe fatal. */
+    if (thread_lookup(IF_UNIX_ELSE(get_sys_thread_id(), d_r_get_thread_id())) !=
+        NULL) {
         d_r_mutex_unlock(&thread_initexit_lock);
 #if defined(WINDOWS) && defined(DR_APP_EXPORTS)
         if (dr_api_entry)

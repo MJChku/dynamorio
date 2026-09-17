@@ -473,6 +473,16 @@ sigprocmask_syscall(int how, kernel_sigset_t *set, kernel_sigset_t *oset,
 }
 
 void
+signal_takeover_unblock_crash_signals(void)
+{
+    kernel_sigset_t set;
+    kernel_sigemptyset(&set);
+    kernel_sigaddset(&set, SIGSEGV);
+    kernel_sigaddset(&set, SIGBUS);
+    sigprocmask_syscall(SIG_UNBLOCK, &set, NULL, sizeof(set));
+}
+
+void
 block_all_noncrash_signals_except(kernel_sigset_t *oset, int num_signals,
                                   ... /* list of signals */)
 {
@@ -5674,6 +5684,12 @@ main_signal_handler_C(byte *xsp)
 #endif /* !X64 */
     sigcontext_t *sc = SIGCXT_FROM_UCXT(ucxt);
     thread_record_t *tr;
+    /* An application can block synchronous crash signals.  A takeover signal
+     * reaches this handler before DR segment TLS exists, and the dcontext
+     * lookup below uses fault-recovering segment reads.  Make that recovery
+     * deliverable while preserving the application's mask in ucxt. */
+    if (sig == SUSPEND_SIGNAL)
+        signal_takeover_unblock_crash_signals();
 #ifdef DEBUG
     uint level = 2;
 #    if !defined(HAVE_MEMINFO)
