@@ -292,6 +292,7 @@ set_linkstub_fields(dcontext_t *dcontext, fragment_t *f, instrlist_t *ilist,
                     dl->target_tag = target;
                 }
             }
+            LINKSTUB_TRACE_EXIT_REFUND(l) = inst->trace_exit_refund;
 
             if (should_separate_stub(dcontext, target, f->flags))
                 l->flags |= LINK_SEPARATE_STUB;

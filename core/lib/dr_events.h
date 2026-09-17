@@ -532,6 +532,24 @@ bool dr_unregister_trace_event(dr_emit_flags_t (*func)(void *drcontext, void *ta
                                                        bool translating));
 
 /**
+ * Enables exact cold-side-exit refunds from traces.  The
+ * budget is a pointer-sized signed value in client raw TLS at \p tls_offset.
+ * This facility is currently supported only for x86-64 application code.
+ * It must be configured before any trace carrying a refund is emitted.
+ */
+DR_API
+bool dr_register_trace_exit_refund(int tls_segment, uint tls_offset);
+
+/**
+ * Associates \p refund with an exit instruction in a trace event. DynamoRIO
+ * executes the refund on the cold direct or indirect-miss path, preserving
+ * all application registers and arithmetic flags. A zero refund clears the
+ * annotation.
+ */
+DR_API
+bool dr_set_trace_exit_refund(instr_t *exit, uint refund);
+
+/**
  * DR will call the end trace event if it is registered prior to
  * adding each basic block to a trace being generated.  The return
  * value of the event callback should be from the

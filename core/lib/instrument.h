@@ -104,6 +104,11 @@ instrument_basic_block(dcontext_t *dcontext, app_pc tag, instrlist_t *bb, bool f
                        bool translating, dr_emit_flags_t *emitflags);
 dr_emit_flags_t
 instrument_trace(dcontext_t *dcontext, app_pc tag, instrlist_t *trace, bool translating);
+bool instrument_trace_exit_refund_enabled(uint fragment_flags);
+uint instrument_trace_exit_refund_tls_offset(void);
+reg_id_t instrument_trace_exit_refund_tls_segment(void);
+uint instrument_trace_exit_refund_stub_extra_size(uint fragment_flags);
+uint instrument_trace_exit_refund_indirect_stub_extra_size(uint fragment_flags);
 dr_custom_trace_action_t
 instrument_end_trace(dcontext_t *dcontext, app_pc trace_tag, app_pc next_tag);
 void

@@ -152,6 +152,51 @@ unpatch_stub(dcontext_t *dcontext, fragment_t *f, cache_pc stub_pc, bool hot_pat
     /* x86 doesn't use this approach to linking: nothing to do */
 }
 
+enum {
+    TRACE_EXIT_REFUND_BODY_SIZE = 25,
+};
+
+static cache_pc
+trace_exit_refund_link_jmp(fragment_t *f, cache_pc stub_pc)
+{
+    cache_pc base = stub_pc +
+        (FRAG_IS_32(f->flags) ? SIZE32_MOV_XAX_TO_TLS
+                              : SIZE64_MOV_XAX_TO_TLS) +
+        TRACE_EXIT_REFUND_BODY_SIZE +
+        (FRAG_IS_32(f->flags) ? SIZE32_MOV_XAX_TO_TLS : SIZE64_MOV_XAX_TO_TLS);
+    uint pad = (uint)(-(ptr_uint_t)(base + 1)) & 3;
+    return base + pad;
+}
+
+static cache_pc
+trace_exit_refund_unlinked_tail(fragment_t *f, cache_pc stub_pc)
+{
+    cache_pc base = stub_pc +
+        (FRAG_IS_32(f->flags) ? SIZE32_MOV_XAX_TO_TLS
+                              : SIZE64_MOV_XAX_TO_TLS) +
+        TRACE_EXIT_REFUND_BODY_SIZE +
+        (FRAG_IS_32(f->flags) ? SIZE32_MOV_XAX_TO_TLS : SIZE64_MOV_XAX_TO_TLS);
+    return base + 3 + JMP_LONG_LENGTH;
+}
+
+void
+patch_trace_exit_refund_stub(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
+                             cache_pc target_pc, bool hot_patch)
+{
+    patch_branch(FRAG_ISA_MODE(f->flags),
+                 trace_exit_refund_link_jmp(f, EXIT_STUB_PC(dcontext, f, l)),
+                 target_pc, hot_patch);
+}
+
+void
+unpatch_trace_exit_refund_stub(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
+                               bool hot_patch)
+{
+    cache_pc stub_pc = EXIT_STUB_PC(dcontext, f, l);
+    patch_branch(FRAG_ISA_MODE(f->flags), trace_exit_refund_link_jmp(f, stub_pc),
+                 trace_exit_refund_unlinked_tail(f, stub_pc), hot_patch);
+}
+
 /* Patch the (direct) branch at branch_pc so it branches to target_pc
  * The write that actually patches the branch is done atomically so this
  * function is safe with respect to a thread executing this branch presuming
@@ -466,6 +511,77 @@ insert_restore_xax(dcontext_t *dcontext, cache_pc pc, uint flags, bool shared,
                                    REG_XAX, tls_offs, XAX_OFFSET, require_addr16);
 }
 
+/* Add an immediate to a pointer-sized client raw-TLS slot without changing
+ * application flags.  XAX is available because the direct exit stub has
+ * already saved it to DynamoRIO TLS.  The fixed 25-byte encoding keeps every
+ * direct trace stub the same size regardless of its particular refund. */
+static cache_pc
+insert_trace_exit_refund(cache_pc pc, uint tls_offset, reg_id_t tls_segment,
+                         uint32 refund)
+{
+    byte segment_prefix;
+    byte *writable;
+
+    ASSERT(tls_segment == DR_SEG_FS || tls_segment == DR_SEG_GS);
+    segment_prefix = tls_segment == DR_SEG_FS ? 0x64 : 0x65;
+    writable = vmcode_get_writable_addr(pc);
+
+    /* mov %seg:disp32,%rax */
+    *writable++ = segment_prefix;
+    *writable++ = 0x48;
+    *writable++ = 0x8b;
+    *writable++ = 0x04;
+    *writable++ = 0x25;
+    *(uint32 *)writable = tls_offset;
+    writable += sizeof(uint32);
+    /* lea refund(%rax),%rax */
+    *writable++ = 0x48;
+    *writable++ = 0x8d;
+    *writable++ = 0x80;
+    *(uint32 *)writable = refund;
+    writable += sizeof(uint32);
+    /* mov %rax,%seg:disp32 */
+    *writable++ = segment_prefix;
+    *writable++ = 0x48;
+    *writable++ = 0x89;
+    *writable++ = 0x04;
+    *writable++ = 0x25;
+    *(uint32 *)writable = tls_offset;
+    writable += sizeof(uint32);
+
+    ASSERT(writable - vmcode_get_writable_addr(pc) == TRACE_EXIT_REFUND_BODY_SIZE);
+    return vmcode_get_executable_addr(writable);
+}
+
+/* The trace comparison has already saved application flags before its cold
+ * indirect-miss stub.  Refund there with one fixed-size memory add and no
+ * register clobbers.  Zero-refund indirect exits receive NOPs so every stub
+ * retains the size computed before its linkstub is populated. */
+static cache_pc
+insert_trace_indirect_exit_refund(cache_pc pc, uint tls_offset,
+                                  reg_id_t tls_segment, uint32 refund)
+{
+    enum { REFUND_SIZE = 13 };
+    byte *writable = vmcode_get_writable_addr(pc);
+    if (refund == 0) {
+        for (uint i = 0; i < REFUND_SIZE; ++i)
+            *writable++ = 0x90;
+    } else {
+        ASSERT(tls_segment == DR_SEG_FS || tls_segment == DR_SEG_GS);
+        *writable++ = tls_segment == DR_SEG_FS ? 0x64 : 0x65;
+        *writable++ = 0x48;
+        *writable++ = 0x81;
+        *writable++ = 0x04;
+        *writable++ = 0x25;
+        *(uint32 *)writable = tls_offset;
+        writable += sizeof(uint32);
+        *(uint32 *)writable = refund;
+        writable += sizeof(uint32);
+    }
+    ASSERT(writable - vmcode_get_writable_addr(pc) == REFUND_SIZE);
+    return vmcode_get_executable_addr(writable);
+}
+
 /* for the hashtable lookup inlined into exit stubs, the
  * lookup routine is encoded earlier into a template,
  * (in the routine emit_inline_ibl_stub(), below)
@@ -576,12 +692,22 @@ insert_exit_stub_other_flags(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
     }
 
     if (indirect && can_inline) {
+        if (instrument_trace_exit_refund_enabled(f->flags))
+            pc = insert_trace_indirect_exit_refund(
+                pc, instrument_trace_exit_refund_tls_offset(),
+                instrument_trace_exit_refund_tls_segment(),
+                LINKSTUB_TRACE_EXIT_REFUND(l));
         pc = insert_inlined_ibl(dcontext, f, l, pc, exit_target, f->flags);
         IF_X64(ASSERT(CHECK_TRUNCATE_TYPE_int(pc - stub_pc)));
         return (int)(pc - stub_pc);
     }
 
     if (indirect) {
+        if (instrument_trace_exit_refund_enabled(f->flags))
+            pc = insert_trace_indirect_exit_refund(
+                pc, instrument_trace_exit_refund_tls_offset(),
+                instrument_trace_exit_refund_tls_segment(),
+                LINKSTUB_TRACE_EXIT_REFUND(l));
         pc = insert_jmp_to_ibl(pc, f, l, exit_target, dcontext);
     } else if (TESTANY(FRAG_COARSE_GRAIN, f->flags)) {
         /* This is an entrance stub.  It may be executed even when linked,
@@ -658,6 +784,41 @@ insert_exit_stub_other_flags(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
            note that indirect stubs use XBX for linkstub pointer */
         pc = insert_save_xax(dcontext, pc, f->flags, FRAG_DB_SHARED(f->flags),
                              DIRECT_STUB_SPILL_SLOT, true);
+
+        if (instrument_trace_exit_refund_enabled(f->flags)) {
+            cache_pc patchable_base;
+            cache_pc unlinked_tail;
+            uint pad;
+            uint trailing_pad;
+
+            pc = insert_trace_exit_refund(
+                pc, instrument_trace_exit_refund_tls_offset(),
+                instrument_trace_exit_refund_tls_segment(),
+                LINKSTUB_TRACE_EXIT_REFUND(l));
+            pc = insert_restore_xax(dcontext, pc, f->flags,
+                                    FRAG_DB_SHARED(f->flags),
+                                    DIRECT_STUB_SPILL_SLOT, true);
+            patchable_base = pc;
+            pad = (uint)(-(ptr_uint_t)(patchable_base + 1)) & 3;
+            for (uint i = 0; i < pad; ++i) {
+                *vmcode_get_writable_addr(pc) = 0x90;
+                ++pc;
+            }
+            unlinked_tail = patchable_base + 3 + JMP_LONG_LENGTH;
+            pc = insert_relative_jump(pc, unlinked_tail, NOT_HOT_PATCHABLE);
+            trailing_pad = 3 - pad;
+            for (uint i = 0; i < trailing_pad; ++i) {
+                *vmcode_get_writable_addr(pc) = 0x90;
+                ++pc;
+            }
+            ASSERT(pc == unlinked_tail);
+            /* The unlinked tail recreates the ordinary direct-stub protocol.
+             * Linking patches only the preceding rel32 jump, atomically, to
+             * bypass this tail and enter the target with XAX restored. */
+            pc = insert_save_xax(dcontext, pc, f->flags,
+                                 FRAG_DB_SHARED(f->flags),
+                                 DIRECT_STUB_SPILL_SLOT, true);
+        }
 
         /* mov $linkstub_ptr,%xax */
 #ifdef X64

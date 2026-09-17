@@ -1086,6 +1086,72 @@ dr_register_trace_event(dr_emit_flags_t (*func)(void *drcontext, void *tag,
     add_callback(&trace_callbacks, (void (*)(void))func, true);
 }
 
+static bool trace_exit_refund_registered;
+static reg_id_t trace_exit_refund_tls_segment;
+static uint trace_exit_refund_tls_offset;
+
+bool
+dr_register_trace_exit_refund(int tls_segment, uint tls_offset)
+{
+#if defined(X86) && defined(X64)
+    if (tls_segment != DR_SEG_FS && tls_segment != DR_SEG_GS)
+        return false;
+    trace_exit_refund_tls_segment = tls_segment;
+    trace_exit_refund_tls_offset = tls_offset;
+    trace_exit_refund_registered = true;
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool
+dr_set_trace_exit_refund(instr_t *exit, uint refund)
+{
+    if (!trace_exit_refund_registered || exit == NULL ||
+        (!instr_is_exit_cti(exit) && !instr_is_mbr(exit)))
+        return false;
+    exit->trace_exit_refund = refund;
+    return true;
+}
+
+bool
+instrument_trace_exit_refund_enabled(uint fragment_flags)
+{
+#if defined(X86) && defined(X64)
+    return trace_exit_refund_registered && TESTANY(FRAG_IS_TRACE, fragment_flags) &&
+        !FRAG_IS_32(fragment_flags);
+#else
+    return false;
+#endif
+}
+
+uint
+instrument_trace_exit_refund_tls_offset(void)
+{
+    return trace_exit_refund_tls_offset;
+}
+
+reg_id_t
+instrument_trace_exit_refund_tls_segment(void)
+{
+    return trace_exit_refund_tls_segment;
+}
+
+uint
+instrument_trace_exit_refund_stub_extra_size(uint fragment_flags)
+{
+    /* mov tls->xax; lea; mov xax->tls; restore xax; padded jmp; save xax. */
+    return instrument_trace_exit_refund_enabled(fragment_flags) ? 49 : 0;
+}
+
+uint
+instrument_trace_exit_refund_indirect_stub_extra_size(uint fragment_flags)
+{
+    /* addq imm32, %fs|%gs:disp32 */
+    return instrument_trace_exit_refund_enabled(fragment_flags) ? 13 : 0;
+}
+
 bool
 dr_unregister_trace_event(dr_emit_flags_t (*func)(void *drcontext, void *tag,
                                                   instrlist_t *trace, bool translating))

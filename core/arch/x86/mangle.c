@@ -1528,6 +1528,14 @@ mangle_indirect_call(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     opnd_size_t pushsz = stack_entry_size(instr, opnd_get_size(pushop));
     reg_id_t reg_target = REG_XCX;
 
+    if (instr->trace_exit_refund != 0) {
+        instr_t *exit = next_instr;
+        while (exit != NULL && !instr_is_exit_cti(exit))
+            exit = instr_get_next(exit);
+        ASSERT(exit != NULL);
+        exit->trace_exit_refund = instr->trace_exit_refund;
+    }
+
     if (!mangle_calls)
         return next_instr;
     retaddr = get_call_return_address(dcontext, ilist, instr);
@@ -1648,6 +1656,14 @@ mangle_return(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     instr_t *pop;
     opnd_t retaddr;
     opnd_size_t retsz;
+
+    if (instr->trace_exit_refund != 0) {
+        instr_t *exit = next_instr;
+        while (exit != NULL && !instr_is_exit_cti(exit))
+            exit = instr_get_next(exit);
+        ASSERT(exit != NULL);
+        exit->trace_exit_refund = instr->trace_exit_refund;
+    }
 
 #ifdef CHECK_RETURNS_SSE2
     check_return_handle_return(dcontext, ilist, next_instr);
@@ -1850,6 +1866,14 @@ mangle_indirect_jump(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
 {
     opnd_t target;
     reg_id_t reg_target = REG_XCX;
+
+    if (instr->trace_exit_refund != 0) {
+        instr_t *exit = next_instr;
+        while (exit != NULL && !instr_is_exit_cti(exit))
+            exit = instr_get_next(exit);
+        ASSERT(exit != NULL);
+        exit->trace_exit_refund = instr->trace_exit_refund;
+    }
 
     /* Convert indirect branches (that are not returns).  Again, the
      * jump to the exit_stub that jumps to indirect_branch_lookup

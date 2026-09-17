@@ -202,15 +202,18 @@ exit_stub_size(dcontext_t *dcontext, cache_pc target, uint flags)
 #endif
 
         if (ibl_code->ibl_head_is_inlined)
-            return ibl_code->inline_stub_length;
+            return ibl_code->inline_stub_length +
+                instrument_trace_exit_refund_indirect_stub_extra_size(flags);
         else
-            return (STUB_INDIRECT_SIZE(flags));
+            return (STUB_INDIRECT_SIZE(flags) +
+                    instrument_trace_exit_refund_indirect_stub_extra_size(flags));
     } else {
         /* direct branch */
         if (TESTANY(FRAG_COARSE_GRAIN, flags))
             return (STUB_COARSE_DIRECT_SIZE(flags));
         else
-            return (STUB_DIRECT_SIZE(flags));
+            return (STUB_DIRECT_SIZE(flags) +
+                    instrument_trace_exit_refund_stub_extra_size(flags));
     }
 }
 
@@ -437,6 +440,13 @@ link_direct_exit(dcontext_t *dcontext, fragment_t *f, linkstub_t *l, fragment_t 
     ASSERT(LINKSTUB_DIRECT(l->flags));
     STATS_INC(num_direct_links);
 
+    if (instrument_trace_exit_refund_enabled(f->flags) &&
+        LINKSTUB_TRACE_EXIT_REFUND(l) != 0) {
+        patch_trace_exit_refund_stub(dcontext, f, l, FCACHE_ENTRY_PC(targetf),
+                                     hot_patch);
+        return false;
+    }
+
 #ifdef TRACE_HEAD_CACHE_INCR
     if ((targetf->flags & FRAG_IS_TRACE_HEAD) != 0) {
         LOG(THREAD, LOG_LINKS, 4,
@@ -484,6 +494,14 @@ unlink_direct_exit(dcontext_t *dcontext, fragment_t *f, linkstub_t *l)
 #endif
     ASSERT(linkstub_owned_by_fragment(dcontext, f, l));
     ASSERT(LINKSTUB_DIRECT(l->flags));
+
+    if (instrument_trace_exit_refund_enabled(f->flags) &&
+        LINKSTUB_TRACE_EXIT_REFUND(l) != 0) {
+        patch_branch(FRAG_ISA_MODE(f->flags), EXIT_CTI_PC(f, l), stub_pc,
+                     HOT_PATCHABLE);
+        unpatch_trace_exit_refund_stub(dcontext, f, l, HOT_PATCHABLE);
+        return;
+    }
 
 #ifdef TRACE_HEAD_CACHE_INCR
     if (dl->target_fragment != NULL) { /* HACK to tell if targeted trace head */

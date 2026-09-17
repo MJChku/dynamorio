@@ -1210,6 +1210,12 @@ bool
 stub_is_patched(dcontext_t *dcontext, fragment_t *f, cache_pc stub_pc);
 void
 unpatch_stub(dcontext_t *dcontext, fragment_t *f, cache_pc stub_pc, bool hot_patch);
+void
+patch_trace_exit_refund_stub(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
+                             cache_pc target_pc, bool hot_patch);
+void
+unpatch_trace_exit_refund_stub(dcontext_t *dcontext, fragment_t *f, linkstub_t *l,
+                               bool hot_patch);
 
 byte *
 emit_inline_ibl_stub(dcontext_t *dcontext, byte *pc, ibl_code_t *ibl_code,

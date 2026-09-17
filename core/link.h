@@ -166,6 +166,9 @@ struct _linkstub_t {
      * Do not directly access this field -- use EXIT_CTI_PC()
      */
     ushort cti_offset; /* offset from fragment start_pc of this cti */
+
+    /* Amount added to client raw-TLS budget on this cold trace exit. */
+    uint trace_exit_refund;
 };
 
 /* linkage info common to all direct fragment exits */
@@ -191,6 +194,8 @@ typedef struct _common_direct_linkstub_t {
     fragment_t *target_fragment;
 #endif
 } common_direct_linkstub_t;
+
+#define LINKSTUB_TRACE_EXIT_REFUND(l) ((l)->trace_exit_refund)
 
 /* linkage info for each direct fragment exit */
 typedef struct _direct_linkstub_t {

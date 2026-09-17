@@ -240,6 +240,11 @@ struct _instr_t {
      */
     void *note;
 
+    /* Optional client-requested refund for a cold direct trace exit.  This is
+     * copied into the persistent linkstub during fragment emission.  Clients
+     * must use dr_set_trace_exit_refund() instead of accessing it directly. */
+    uint trace_exit_refund;
+
     /* fields for building instructions into instruction lists */
     instr_t *prev;
     instr_t *next;
