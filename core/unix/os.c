@@ -174,6 +174,8 @@ typedef int (*init_fn_t)(int argc, char **argv, char **envp);
  * that we don't see what libc says.
  */
 char **our_environ;
+/* A late app-API attachment may refresh envp after libc relocated it. */
+static bool our_environ_has_auxv = true;
 #endif
 
 #include <errno.h>
@@ -729,7 +731,7 @@ is_our_environ_followed_by_auxv(void)
      */
     return false;
 #else
-    return true;
+    return our_environ_has_auxv;
 #endif
 }
 
@@ -744,6 +746,17 @@ DYNAMORIO_EXPORT
 void
 dynamorio_set_envp(char **envp)
 {
+#ifndef STATIC_LIBRARY
+    if (our_environ != NULL && our_environ != envp) {
+        /* Preserve startup auxv information before switching to libc's potentially
+         * heap-allocated environment. Never scan past that new environment for auxv.
+         * Process-title libraries may overwrite the old strings, but leave the
+         * startup pointer array and auxiliary vector intact.
+         */
+        os_page_size_init((const char **)our_environ, our_environ_has_auxv);
+        our_environ_has_auxv = false;
+    }
+#endif
     our_environ = envp;
 }
 
