@@ -112,6 +112,12 @@ skipme(int *x)
 }
 
 int EXPORT
+skip_preonly(int x)
+{
+    return x + 1; /* Must never execute when wrapped. */
+}
+
+int EXPORT
 repeatme(int x)
 {
     print("in repeatme with arg %d\n", x);
@@ -286,6 +292,14 @@ run_tests(void)
     int res;
     level2_ptr = (void *)level2;
     print("thread.appdll process init\n");
+    /* Same call-site/stack depth, many more than MAX_WRAP_NESTING. Neither
+     * normal post hooks nor unwind detection can rescue leaked skip state. */
+    for (int i = 0; i < 256; ++i) {
+        if (skip_preonly(i) != i) {
+            print("ERROR: repeated pre-only skip failed at %d\n", i);
+            abort();
+        }
+    }
     skip_flags(1, 2);
     print("level0 returned %d\n", level0(37));
     res = skipme(&x);

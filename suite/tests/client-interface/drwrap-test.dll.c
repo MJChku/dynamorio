@@ -85,6 +85,7 @@ static app_pc addr_level1;
 static app_pc addr_level2;
 static app_pc addr_tailcall;
 static app_pc addr_skipme;
+static app_pc addr_skip_preonly;
 static app_pc addr_repeat;
 static app_pc addr_preonly;
 static app_pc addr_postonly;
@@ -209,6 +210,7 @@ module_load_event(void *drcontext, const module_data_t *mod, bool loaded)
         wrap_addr(&addr_level2, "level2", mod, wrap_pre, wrap_post, 0);
         wrap_addr(&addr_tailcall, "makes_tailcall", mod, wrap_pre, wrap_post, 0);
         wrap_addr(&addr_skipme, "skipme", mod, wrap_pre, wrap_post, 0);
+        wrap_addr(&addr_skip_preonly, "skip_preonly", mod, wrap_pre, NULL, 0);
         wrap_addr(&addr_repeat, "repeatme", mod, wrap_pre, wrap_post, 0);
         wrap_addr(&addr_preonly, "preonly", mod, wrap_pre, NULL, 0);
         wrap_addr(&addr_postonly, "postonly", mod, NULL, wrap_post, 0);
@@ -287,6 +289,7 @@ module_unload_event(void *drcontext, const module_data_t *mod)
         CHECK(ok, "un-replace_native failed");
 
         unwrap_addr(addr_skip_flags, "skip_flags", mod, wrap_pre, NULL);
+        unwrap_addr(addr_skip_preonly, "skip_preonly", mod, wrap_pre, NULL);
         unwrap_addr(addr_level0, "level0", mod, wrap_pre, wrap_post);
         unwrap_addr(addr_level1, "level1", mod, wrap_pre, wrap_post);
         unwrap_addr(addr_level2, "level2", mod, wrap_pre, wrap_post);
@@ -434,7 +437,10 @@ wrap_pre(void *wrapcxt, DR_PARAM_OUT void **user_data)
 {
     bool ok;
     CHECK(wrapcxt != NULL && user_data != NULL, "invalid arg");
-    if (drwrap_get_func(wrapcxt) == addr_skip_flags) {
+    if (drwrap_get_func(wrapcxt) == addr_skip_preonly) {
+        ok = drwrap_skip_call(wrapcxt, drwrap_get_arg(wrapcxt, 0), 0);
+        CHECK(ok, "repeated pre-only skip failed");
+    } else if (drwrap_get_func(wrapcxt) == addr_skip_flags) {
         CHECK(drwrap_get_arg(wrapcxt, 0) == (void *)1, "get_arg wrong");
         CHECK(drwrap_get_arg(wrapcxt, 1) == (void *)2, "get_arg wrong");
     } else if (drwrap_get_func(wrapcxt) == addr_level0) {

@@ -2137,7 +2137,18 @@ drwrap_in_callee(void *arg1, reg_t xsp _IF_NOT_X86(IF_RISCV64_ELSE(reg_t ra, reg
     if (pt->skip[pt->wrap_level]) {
         /* drwrap_skip_call already adjusted the stack and pc */
         /* ensure we have DR_MC_ALL */
-        dr_redirect_execution(drwrap_get_mcontext_internal((void *)&wrapcxt, DR_MC_ALL));
+        dr_mcontext_t *redirect_mc =
+            drwrap_get_mcontext_internal((void *)&wrapcxt, DR_MC_ALL);
+        /* A pre-only wrapper has no post-call instrumentation to pop this
+         * level. Repeated skipped calls at the same stack depth otherwise
+         * exhaust MAX_WRAP_NESTING and silently run unwrapped in release. */
+        if (!intercept_post) {
+            pt->skip[pt->wrap_level] = false;
+            if (!TESTANY(DRWRAP_NO_FRILLS, global_flags))
+                drwrap_free_user_data(drcontext, pt, pt->wrap_level);
+            pt->wrap_level--;
+        }
+        dr_redirect_execution(redirect_mc);
         ASSERT(false, "dr_redirect_execution should not return");
     }
     if (wrapcxt.mc_modified)

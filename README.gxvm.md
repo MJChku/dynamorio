@@ -12,7 +12,9 @@ Included changes:
 - optional huge-page code-cache mappings;
 - exact direct/indirect trace side-exit refund instrumentation;
 - diagnostics for missing trace continuation targets;
-- trace termination at native `drwrap` replacement boundaries.
+- trace termination at native `drwrap` replacement boundaries;
+- unwind skipped pre-only `drwrap` calls immediately (repeated calls must not
+  exhaust the wrapper nesting limit and silently bypass instrumentation).
 
 The old user-level task-switch segment-base API is deliberately not included.
 GXVM uses native Linux pthreads and does not virtualize their TLS.
