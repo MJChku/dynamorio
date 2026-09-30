@@ -470,11 +470,19 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
                 ASSERT(spill || walk->reg_tls[r] == spill_tls);
                 if (spill) {
                     ASSERT(offs != UINT_MAX);
-                    walk->reg_spill_offs[r] = offs;
-                } else {
+                    /* A second spill may contain a mangling temporary, not
+                     * application state. In particular an x64 trace compare
+                     * saves app RAX in slot 0, then saves its target-address
+                     * temporary in slot 1. Keep the original app spill until
+                     * its matching restore, including when interrupted here. */
+                    if (walk->reg_spill_offs[r] == UINT_MAX) {
+                        walk->reg_spill_offs[r] = offs;
+                        walk->reg_tls[r] = spill_tls;
+                    }
+                } else if (walk->reg_spill_offs[r] == offs &&
+                           walk->reg_tls[r] == spill_tls) {
                     walk->reg_spill_offs[r] = UINT_MAX;
                 }
-                walk->reg_tls[r] = spill_tls;
                 LOG(THREAD_GET, LOG_INTERP, 4, "\tspill update: %s %s %s offs=%u\n",
                     spill ? "spill" : "restore", spill_tls ? "tls" : "mcontext",
                     reg_names[reg], offs);
@@ -592,6 +600,33 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
         }
     }
 }
+
+#ifdef STANDALONE_UNIT_TEST
+void
+unit_test_translate_spills(dcontext_t *dcontext)
+{
+#    if defined(X86) && defined(X64)
+    priv_mcontext_t mc = { 0 };
+    translate_walk_t walk;
+    translate_walk_init(&walk, NULL, NULL, &mc);
+    instr_t *sequence[] = {
+        instr_create_save_to_tls(dcontext, REG_XAX, TLS_REG0_SLOT),
+        instr_create_save_to_tls(dcontext, REG_XAX, TLS_REG1_SLOT),
+        instr_create_restore_from_tls(dcontext, REG_XAX, TLS_REG1_SLOT),
+        instr_create_restore_from_tls(dcontext, REG_XAX, TLS_REG0_SLOT),
+    };
+    /* A trace compare stores app RAX, then its temporary target address.
+     * Restoring the temporary is not a restoration of application state. */
+    for (uint i = 0; i < sizeof(sequence) / sizeof(sequence[0]); ++i) {
+        instr_set_our_mangling(sequence[i], true);
+        translate_walk_track_post_instr(dcontext, sequence[i], &walk);
+        EXPECT(walk.reg_spill_offs[REG_XAX - REG_START_SPILL],
+               (i == 3 ? UINT_MAX : (uint)os_tls_offset(TLS_REG0_SLOT)));
+        instr_destroy(dcontext, sequence[i]);
+    }
+#    endif
+}
+#endif
 
 static bool
 translate_walk_good_state(dcontext_t *tdcontext, translate_walk_t *walk,

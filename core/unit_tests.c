@@ -71,6 +71,8 @@ void
 unit_test_atomic_ops(void);
 void
 unit_test_jit_fragment_tree(void);
+void
+unit_test_translate_spills(dcontext_t *dc);
 
 int
 main(int argc, char **argv, char **envp)
@@ -101,6 +103,7 @@ main(int argc, char **argv, char **envp)
     unit_test_asm(dc);
     unit_test_atomic_ops();
     unit_test_jit_fragment_tree();
+    unit_test_translate_spills(dc);
     print_file(STDERR, "all done\n");
     standalone_exit();
     return 0;
