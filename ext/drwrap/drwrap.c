@@ -937,6 +937,7 @@ drwrap_replace_init(void);
  */
 
 static int drwrap_init_count;
+static bool postcall_unlink_flush;
 
 DR_EXPORT
 bool
@@ -960,6 +961,10 @@ drwrap_init(void)
     int count = dr_atomic_add32_return_sum(&drwrap_init_count, 1);
     if (count > 1)
         return true;
+
+    uint64 coarse_units = 1;
+    postcall_unlink_flush =
+        dr_get_integer_option("coarse_units", &coarse_units) && coarse_units == 0;
 
     /* We have to fail if the stolen reg matches what we need */
     if (dr_get_stolen_reg() != DR_REG_NULL &&
@@ -1859,9 +1864,6 @@ drwrap_mark_retaddr_for_instru(void *drcontext, per_thread_t *pt, app_pc decorat
          */
         /* XXX: we're assuming void* tag == pc */
         if (dr_fragment_exists_at(drcontext, (void *)retaddr)) {
-            /* XXX: I'd use dr_unlink_flush_region but it requires -enable_full_api.
-             * should we dynamically check and use it if we can?
-             */
             /* unlock for the flush */
             dr_rwlock_write_unlock(post_call_rwlock);
             if (!enabled) {
@@ -1875,8 +1877,20 @@ drwrap_mark_retaddr_for_instru(void *drcontext, per_thread_t *pt, app_pc decorat
             }
             dr_atomic_add_stat_return_sum(&drwrap_stats.flush_count, 1);
             NOTIFY(3, "%s: flushing %p\n", __FUNCTION__, retaddr);
-            dr_flush_region(retaddr, 1);
-            /* now we are guaranteed no thread is inside the fragment */
+            /* The caller has not returned to this address yet. Prevent new
+             * entries into its old fragment; an unrelated thread already past
+             * the return point need not be suspended. In particular, a client
+             * clean call can be waiting for this thread to make progress.
+             * Keep the synchronous path for coarse caches, where unlink-only
+             * flushing is unavailable. Both paths still redirect this callee
+             * below, and all newly generated return fragments get the hook.
+             */
+            bool flushed = postcall_unlink_flush
+                ? dr_unlink_flush_region(retaddr, 1)
+                : dr_flush_region(retaddr, 1);
+            ASSERT(flushed, "post-call flush failed");
+            if (!flushed)
+                dr_abort();
             /* another thread may have done a racy competing flush: should be fine */
             dr_rwlock_read_lock(post_call_rwlock);
             e = (post_call_entry_t *)hashtable_lookup(&post_call_table, (void *)retaddr);

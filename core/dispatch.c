@@ -940,6 +940,12 @@ dispatch_enter_dynamorio(dcontext_t *dcontext)
                  * a good way to undo the pre-handler.
                  */
                 set_next_tag_to_prior_syscall(dcontext);
+                /* The syscall instruction now represents the pending retry.
+                 * Do not also retain the client request while dispatch runs
+                 * an application signal handler: its first cache exit would
+                 * otherwise invoke a syscall using the handler's registers.
+                 */
+                dcontext->client_data->invoke_another_syscall = false;
             } else {
                 handle_system_call(dcontext);
                 /* We'll return here if decided to skip the syscall; else, back to
