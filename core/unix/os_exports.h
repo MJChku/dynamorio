@@ -321,6 +321,11 @@ bool
 is_our_environ_followed_by_auxv(void);
 void
 dynamorio_set_envp(char **envp);
+void
+dynamorio_set_environ_location(char ***location);
+/* The environment array to read now (the app's live array after a late attach). */
+char **
+os_get_environ(void);
 #if !defined(NOT_DYNAMORIO_CORE_PROPER) && !defined(NOT_DYNAMORIO_CORE)
 /* drinjectlib wants the libc version while the core wants the private version */
 #    define getenv our_getenv

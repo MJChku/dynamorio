@@ -176,7 +176,27 @@ typedef int (*init_fn_t)(int argc, char **argv, char **envp);
 char **our_environ;
 /* A late app-API attachment may refresh envp after libc relocated it. */
 static bool our_environ_has_auxv = true;
+/* Address of the application's live environ variable (libc's __environ), registered by
+ * a late-attaching application via dynamorio_set_environ_location().  libc's
+ * setenv/putenv of a new name reallocates the environ array and frees the old one, so
+ * once the app runs past attach a cached array pointer (our_environ) can be freed
+ * memory: every read after attach goes through os_get_environ() instead.
+ */
+static char ***app_environ_location;
 #endif
+
+/* The environment array to read now: the app's live array when its location is known
+ * (late attach), else the array given at init (our_environ).
+ */
+char **
+os_get_environ(void)
+{
+#ifndef STATIC_LIBRARY
+    if (app_environ_location != NULL && *app_environ_location != NULL)
+        return *app_environ_location;
+#endif
+    return our_environ;
+}
 
 #include <errno.h>
 /* avoid problems with use of errno as var name in rest of file */
@@ -646,12 +666,12 @@ our_unsetenv(const char *name)
 {
     /* XXX: really we should have some kind of synchronization */
     size_t name_len;
-    char **env = our_environ;
+    char **env = os_get_environ();
     if (name == NULL || *name == '\0' || strchr(name, '=') != NULL) {
         return -1;
     }
-    ASSERT(our_environ != NULL);
-    if (our_environ == NULL)
+    ASSERT(env != NULL);
+    if (env == NULL)
         return -1;
     name_len = strlen(name);
     while (*env != NULL) {
@@ -674,12 +694,12 @@ bool
 disable_env(const char *name)
 {
     size_t name_len;
-    char **env = our_environ;
+    char **env = os_get_environ();
     if (name == NULL || *name == '\0' || strchr(name, '=') != NULL) {
         return false;
     }
-    ASSERT(our_environ != NULL);
-    if (our_environ == NULL)
+    ASSERT(env != NULL);
+    if (env == NULL)
         return false;
     name_len = strlen(name);
     while (*env != NULL) {
@@ -701,7 +721,7 @@ disable_env(const char *name)
 char *
 our_getenv(const char *name)
 {
-    char **env = our_environ;
+    char **env = os_get_environ();
     size_t i;
     size_t name_len;
     if (name == NULL || name[0] == '\0' || strchr(name, '=') != NULL) {
@@ -710,8 +730,8 @@ our_getenv(const char *name)
     ASSERT_MESSAGE(CHKLVL_ASSERTS,
                    "our_environ is missing.  _init() or "
                    "dynamorio_set_envp() were not called",
-                   our_environ != NULL);
-    if (our_environ == NULL)
+                   env != NULL);
+    if (env == NULL)
         return NULL;
     name_len = strlen(name);
     for (i = 0; env[i] != NULL; i++) {
@@ -758,6 +778,22 @@ dynamorio_set_envp(char **envp)
     }
 #endif
     our_environ = envp;
+}
+
+/* Late attach: register the address of the application's environ variable (e.g.
+ * &environ) instead of a snapshot of its array.  DR then reads the app's current array
+ * on every getenv/unsetenv (execve handling, option and config lookups), so libc
+ * reallocating and freeing the array after attach cannot leave DR reading freed memory.
+ */
+DYNAMORIO_EXPORT
+void
+dynamorio_set_environ_location(char ***location)
+{
+#ifndef STATIC_LIBRARY
+    if (location != NULL && *location != NULL)
+        dynamorio_set_envp(*location); /* startup auxv snapshot as before */
+    app_environ_location = location;
+#endif
 }
 
 /* shared library init */

@@ -280,7 +280,7 @@ d_r_stackdump(void)
         argv[i++] = core_name;
         argv[i++] = NULL;
         DEBUG_DECLARE(int execve_errno =)
-        execve_syscall("/usr/bin/env", argv, our_environ);
+        execve_syscall("/usr/bin/env", argv, os_get_environ());
         SYSLOG_INTERNAL_ERROR("ERROR: execve failed for debugger: %d", -execve_errno);
         exit_process_syscall(1);
     } else if (pid == -1) {
